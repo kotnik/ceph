@@ -162,6 +162,10 @@ class DispatchQueue;
     list<Message*> sent;
     Cond cond;
     bool send_keepalive;
+    bool reply_keepalive;
+    uint64_t largest_keepalive_id;
+    uint64_t awaiting_keepalive_id;
+    utime_t keepalive_timeout;
     bool halt_delivery; //if a pipe's queue is destroyed, stop adding to it
     bool close_on_empty;
     
@@ -194,7 +198,7 @@ class DispatchQueue;
      */
     int do_sendmsg(struct msghdr *msg, int len, bool more=false);
     int write_ack(uint64_t s);
-    int write_keepalive();
+    int write_keepalive(uint64_t id);
 
     void fault(bool reader=false);
 

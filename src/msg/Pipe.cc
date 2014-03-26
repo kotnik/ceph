@@ -86,7 +86,9 @@ Pipe::Pipe(SimpleMessenger *r, int st, Connection *con)
     reader_running(false), reader_needs_join(false),
     writer_running(false),
     in_q(&(r->dispatch_queue)),
-    send_keepalive(false),
+    send_keepalive(false), reply_keepalive(false),
+    largest_keepalive_id(0), awaiting_keepalive_id(0),
+    keepalive_timeout(),
     close_on_empty(false),
     connect_seq(0), peer_global_seq(0),
     out_seq(0), in_seq(0), in_seq_acked(0) {
@@ -1417,7 +1419,18 @@ void Pipe::reader()
 
     if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
       ldout(msgr->cct,20) << "reader got KEEPALIVE" << dendl;
+      uint64_t id;
+      int rc = tcp_read((char*)&id, sizeof(id));
       pipe_lock.Lock();
+      keepalive_timeout = 0;
+      if (rc < 0) {
+        ldout(msgr->cct,2) << "reader couldn't read keepalive id, "
+            << strerror_r(errno, buf, sizeof(buf)) << dendl;
+        fault(true);
+      } else if (id > largest_keepalive_id) {
+        largest_keepalive_id = id;
+        reply_keepalive = true;
+      }
       continue;
     }
 
@@ -1569,16 +1582,29 @@ void Pipe::writer()
 	(is_queued() || in_seq > in_seq_acked)) {
 
       // keepalive?
-      if (send_keepalive) {
+      if (send_keepalive || reply_keepalive) {
+	bool awaiting_response = false;
+        uint64_t keepalive_id = largest_keepalive_id;
+        if (send_keepalive) {
+	  ++largest_keepalive_id;
+	  ++keepalive_id;
+	  awaiting_keepalive_id = keepalive_id;
+	  awaiting_response = true;
+	}
 	pipe_lock.Unlock();
-	int rc = write_keepalive();
+	int rc = write_keepalive(keepalive_id);
 	pipe_lock.Lock();
+	if (awaiting_response) {
+	  keepalive_timeout = ceph_clock_now(msgr->cct);
+	  keepalive_timeout += 10.0;
+	}
+        send_keepalive = false;
+        reply_keepalive = false;
 	if (rc < 0) {
 	  ldout(msgr->cct,2) << "writer couldn't write keepalive, " << strerror_r(errno, buf, sizeof(buf)) << dendl;
 	  fault();
  	  continue;
 	}
-	send_keepalive = false;
       }
 
       // send ack?
@@ -1668,7 +1694,12 @@ void Pipe::writer()
 
     // wait
     ldout(msgr->cct,20) << "writer sleeping" << dendl;
-    cond.Wait(pipe_lock);
+    if (!keepalive_timeout.is_zero()) {
+      int cond_rc = cond.WaitUntil(pipe_lock, keepalive_timeout);
+      if (cond_rc)
+	fault();
+    } else
+      cond.Wait(pipe_lock);
   }
   
   ldout(msgr->cct,20) << "writer finishing" << dendl;
@@ -2020,7 +2051,7 @@ int Pipe::write_ack(uint64_t seq)
   return 0;
 }
 
-int Pipe::write_keepalive()
+int Pipe::write_keepalive(uint64_t id)
 {
   ldout(msgr->cct,10) << "write_keepalive" << dendl;
 
@@ -2028,11 +2059,13 @@ int Pipe::write_keepalive()
 
   struct msghdr msg;
   memset(&msg, 0, sizeof(msg));
-  struct iovec msgvec[2];
+  struct iovec msgvec[3];
   msgvec[0].iov_base = &c;
   msgvec[0].iov_len = 1;
+  msgvec[1].iov_base = &id;
+  msgvec[1].iov_len = sizeof(uint64_t);
   msg.msg_iov = msgvec;
-  msg.msg_iovlen = 1;
+  msg.msg_iovlen = 2;
   
   if (do_sendmsg(&msg, 1) < 0)
     return -1;	
