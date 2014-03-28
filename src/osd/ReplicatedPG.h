@@ -825,6 +825,7 @@ protected:
   friend struct C_OnPushCommit;
 
   // projected object info
+  map<hobject_t, ObjectContextRef> pinned_object_contexts;
   SharedPtrRegistry<hobject_t, ObjectContext> object_contexts;
   // map from oid.snapdir() to SnapSetContext *
   map<hobject_t, SnapSetContext*> snapset_contexts;
@@ -990,7 +991,7 @@ protected:
     const hobject_t& head, const hobject_t& coid,
     object_info_t *poi);
   void execute_ctx(OpContext *ctx);
-  void finish_ctx(OpContext *ctx, int log_op_type);
+  void finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc=true);
   void reply_ctx(OpContext *ctx, int err);
   void reply_ctx(OpContext *ctx, int err, eversion_t v, version_t uv);
   void make_writeable(OpContext *ctx);
@@ -1184,7 +1185,7 @@ protected:
   // -- flush --
   map<hobject_t, FlushOpRef> flush_ops;
 
-  int start_flush(OpContext *ctx, bool blocking);
+  int start_flush(OpContext *ctx, bool blocking, hobject_t *pmissing);
   void finish_flush(hobject_t oid, ceph_tid_t tid, int r);
   int try_flush_mark_clean(FlushOpRef fop);
   void cancel_flush(FlushOpRef fop, bool requeue);
